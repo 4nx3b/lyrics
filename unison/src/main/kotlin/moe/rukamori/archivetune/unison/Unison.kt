@@ -77,7 +77,22 @@ object Unison {
 
         val cleanVideoId = videoId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         logger?.invoke("No metadata match, fetching Unison lyrics by videoId: $cleanVideoId")
-        return fetchByVideoId(cleanVideoId)
+        // IMPORTANT: Try fetchVariants FIRST, then fall back to fetchByVideoId.
+        //
+        // The two endpoints behave differently for some songs on Unison's API:
+        //   /lyrics/variants/{videoId}  -> returns the lyrics for ~3% of songs where
+        //   /lyrics?v={videoId}         -> returns 404 "Lyrics not found"
+        // (Verified against the live API: e.g. videoId vK-3JANH6sE, OthSgKuDi8I,
+        // dukNdSgaLtc all return 404 from /lyrics?v=X but return valid word-synced
+        // lyrics from /lyrics/variants/X.)
+        //
+        // This mirrors the fallback chain already used by [getAllLyrics] (used by the
+        // lyrics search dialog). Without this fallback here, the auto-fetch path
+        // (used by "Prioritize Word Synced Lyrics") would silently miss Unison's
+        // word-synced lyrics for these songs and fall through to line-synced lyrics
+        // from another provider — exactly the bug the user reported: "unison had word
+        // synced but it still didn't detect it and played line synced songs".
+        return fetchVariants(cleanVideoId).firstOrNull() ?: fetchByVideoId(cleanVideoId)
     }
 
     private suspend fun fetchByVideoId(videoId: String): UnisonEntry? {
