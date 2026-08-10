@@ -190,7 +190,10 @@ object TTMLParser {
                 }
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            // Swallow: the caller checks for an empty list and falls back to
+            // other parsing strategies. Previously this called
+            // e.printStackTrace() which synchronizes on System.err and causes
+            // logcat contention during parallel lyrics prefetch.
             return emptyList()
         }
 

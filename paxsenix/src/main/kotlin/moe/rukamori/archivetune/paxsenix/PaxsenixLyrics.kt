@@ -31,6 +31,22 @@ object PaxsenixLyrics {
     var userAgent: String = "ArchiveTune"
         private set
 
+    // Optional logger callback. When set by the host app (e.g. routed through
+    // GlobalLog/Timber), diagnostic messages go through the app's normal logging
+    // pipeline. When null, messages are silently dropped — which is fine for
+    // production since these are routine status lines, not errors.
+    //
+    // This replaces 38 System.err.println() calls that previously synchronized
+    // on System.err (Android redirects it to logcat one line at a time as
+    // `W/System.err`). During lyrics prefetch multiple providers run in
+    // parallel, and the contention + allocation churn was a measurable source
+    // of GC pressure and UI jank.
+    var logger: ((String) -> Unit)? = null
+
+    private fun log(message: String) {
+        logger?.invoke(message)
+    }
+
     fun setUserAgent(
         appName: String,
         versionName: String,
@@ -191,7 +207,7 @@ object PaxsenixLyrics {
         durationMs: Long,
     ): String? {
         val query = "$title $artist"
-        System.err.println("PaxsenixLyrics: Searching Apple Music catalog for: $query")
+        log("Searching Apple Music catalog for: $query")
 
         val country = Locale.getDefault().country
         val storefront = if (country.length == 2) country.lowercase(Locale.ROOT) else "us"
@@ -209,7 +225,7 @@ object PaxsenixLyrics {
                 }
 
             if (response.status != HttpStatusCode.OK) {
-                System.err.println("PaxsenixLyrics: AMP search failed with status: ${response.status}")
+                log("AMP search failed with status: ${response.status}")
                 return@runCatching null
             }
 
@@ -224,7 +240,7 @@ object PaxsenixLyrics {
                     ?: return@runCatching null
 
             if (songs.isEmpty()) {
-                System.err.println("PaxsenixLyrics: AMP search returned no results")
+                log("AMP search returned no results")
                 return@runCatching null
             }
 
@@ -270,17 +286,17 @@ object PaxsenixLyrics {
                     }.sortedByDescending { it.score }
 
             val best = scored.firstOrNull() ?: return@runCatching null
-            System.err.println("PaxsenixLyrics: Best AMP match: ${best.name} by ${best.artistName} (ID: ${best.id}, Score: ${best.score})")
+            log("Best AMP match: ${best.name} by ${best.artistName} (ID: ${best.id}, Score: ${best.score})")
 
             if (best.score < 12) {
-                System.err.println("PaxsenixLyrics: Rejecting match — score $best.score < 12")
+                log("Rejecting match — score ${best.score} < 12")
                 return@runCatching null
             }
 
             best.id
         }.onFailure { e ->
             if (e is CancellationException) throw e
-            System.err.println("PaxsenixLyrics: AMP search error: ${e.message}")
+            log("AMP search error: ${e.message}")
         }.getOrNull()
     }
 
@@ -301,26 +317,26 @@ object PaxsenixLyrics {
                     parameter("ttml", "true")
                 }
 
-            System.err.println("PaxsenixLyrics: Apple Music lyrics (TTML) status: ${lyricsResponse.status}")
+            log("Apple Music lyrics (TTML) status: ${lyricsResponse.status}")
             if (lyricsResponse.status == HttpStatusCode.OK) {
                 try {
                     val rawBody = lyricsResponse.body<String>().trim()
 
                     if (rawBody.startsWith("<tt") || rawBody.startsWith("<?xml")) {
-                        System.err.println("PaxsenixLyrics: SUCCESS from Apple Music (Direct TTML)")
+                        log("SUCCESS from Apple Music (Direct TTML)")
                         return@runCatching rawBody
                     }
 
                     val data = Json.decodeFromString<JsonObject>(rawBody)
                     val content = data["content"]?.jsonPrimitive?.content
                     if (content != null && (content.contains("<tt") || content.contains("<?xml"))) {
-                        System.err.println("PaxsenixLyrics: SUCCESS from Apple Music (JSON-wrapped TTML, Length: ${content.length})")
+                        log("SUCCESS from Apple Music (JSON-wrapped TTML, Length: ${content.length})")
                         return@runCatching content
                     } else {
-                        System.err.println("PaxsenixLyrics: Apple Music TTML content was null or invalid. Type: ${data["type"]}")
+                        log("Apple Music TTML content was null or invalid. Type: ${data["type"]}")
                     }
                 } catch (e: Exception) {
-                    System.err.println("PaxsenixLyrics: Error parsing Apple Music TTML: ${e.message}")
+                    log("Error parsing Apple Music TTML: ${e.message}")
                 }
             }
 
@@ -328,11 +344,11 @@ object PaxsenixLyrics {
                 client.get("apple-music/lyrics") {
                     parameter("id", songId)
                 }
-            System.err.println("PaxsenixLyrics: Apple Music lyrics (JSON) status: ${jsonResponse.status}")
+            log("Apple Music lyrics (JSON) status: ${jsonResponse.status}")
             if (jsonResponse.status == HttpStatusCode.OK) {
                 val lyricsData = jsonResponse.body<AppleMusicLyricsResponse>()
                 if (lyricsData.content.isNotEmpty()) {
-                    System.err.println("PaxsenixLyrics: SUCCESS from Apple Music (LRC Fallback)")
+                    log("SUCCESS from Apple Music (LRC Fallback)")
                     return@runCatching convertAppleMusicToLrc(lyricsData)
                 }
             }
@@ -366,9 +382,7 @@ object PaxsenixLyrics {
 
                 if (bestMatch != null) {
                     val diff = abs(bestMatch.duration.toLong() - durationMs)
-                    System.err.println(
-                        "PaxsenixLyrics: Best NetEase match: ${bestMatch.name} (ID: ${bestMatch.id}, Duration: ${bestMatch.duration}, Diff: $diff)",
-                    )
+                    log("Best NetEase match: ${bestMatch.name} (ID: ${bestMatch.id}, Duration: ${bestMatch.duration}, Diff: $diff)")
                     if (durationMs <= 0 || (diff < 10000)) {
                         val lyricsResponse =
                             client.get("netease/lyrics") {
@@ -376,7 +390,7 @@ object PaxsenixLyrics {
                                 parameter("word", "true")
                             }
 
-                        System.err.println("PaxsenixLyrics: NetEase lyrics status: ${lyricsResponse.status}")
+                        log("NetEase lyrics status: ${lyricsResponse.status}")
                         if (lyricsResponse.status == HttpStatusCode.OK) {
                             val lyricsData = lyricsResponse.body<JsonObject>()
 
@@ -388,7 +402,7 @@ object PaxsenixLyrics {
                                     ?.jsonPrimitive
                                     ?.content
                             if (!klyric.isNullOrBlank()) {
-                                System.err.println("PaxsenixLyrics: SUCCESS from NetEase (Karaoke)")
+                                log("SUCCESS from NetEase (Karaoke)")
                                 return@runCatching klyric
                             }
 
@@ -400,7 +414,7 @@ object PaxsenixLyrics {
                                     ?.jsonPrimitive
                                     ?.content
                             if (!lrc.isNullOrBlank()) {
-                                System.err.println("PaxsenixLyrics: SUCCESS from NetEase (LRC)")
+                                log("SUCCESS from NetEase (LRC)")
                                 return@runCatching lrc
                             }
                         }
@@ -433,19 +447,17 @@ object PaxsenixLyrics {
 
                 if (bestMatch != null) {
                     val diff = abs(bestMatch.durationMs - durationMs)
-                    System.err.println(
-                        "PaxsenixLyrics: Best Spotify match: ${bestMatch.name ?: bestMatch.title} (ID: ${bestMatch.realId}, Duration: ${bestMatch.durationMs}, Diff: $diff)",
-                    )
+                    log("Best Spotify match: ${bestMatch.name ?: bestMatch.title} (ID: ${bestMatch.realId}, Duration: ${bestMatch.durationMs}, Diff: $diff)")
                     if (durationMs <= 0 || (diff < 10000)) {
                         val lyricsResponse =
                             client.get("spotify/lyrics") {
                                 parameter("id", bestMatch.realId)
                             }
-                        System.err.println("PaxsenixLyrics: Spotify lyrics status: ${lyricsResponse.status}")
+                        log("Spotify lyrics status: ${lyricsResponse.status}")
                         if (lyricsResponse.status == HttpStatusCode.OK) {
                             val data = cleanJsonLyrics(lyricsResponse.body<String>())
                             if (data != null) {
-                                System.err.println("PaxsenixLyrics: SUCCESS from Spotify")
+                                log("SUCCESS from Spotify")
                                 return@runCatching data
                             }
                         }
@@ -463,14 +475,14 @@ object PaxsenixLyrics {
         runCatching {
             val durationMs = resolveDurationMs(durationSeconds)
             val query = "$title $artist"
-            System.err.println("PaxsenixLyrics: Requesting YouTube lyrics for: $query (Duration: $durationSeconds)")
+            log("Requesting YouTube lyrics for: $query (Duration: $durationSeconds)")
 
             val searchResponse =
                 client.get("youtube/search") {
                     parameter("q", query)
                 }
             if (searchResponse.status != HttpStatusCode.OK) {
-                System.err.println("PaxsenixLyrics: YouTube search failed with status: ${searchResponse.status}")
+                log("YouTube search failed with status: ${searchResponse.status}")
                 throw IllegalStateException("YouTube lyrics unavailable")
             }
 
@@ -484,22 +496,20 @@ object PaxsenixLyrics {
 
             if (bestMatch != null) {
                 val diff = abs(bestMatch.durationMs - durationMs)
-                System.err.println(
-                    "PaxsenixLyrics: Best YouTube match: ${bestMatch.name ?: bestMatch.title} (ID: ${bestMatch.realId}, Duration: ${bestMatch.durationMs}, Diff: $diff)",
-                )
+                log("Best YouTube match: ${bestMatch.name ?: bestMatch.title} (ID: ${bestMatch.realId}, Duration: ${bestMatch.durationMs}, Diff: $diff)")
                 if (durationMs <= 0 || (diff < 10000)) {
                     val lyricsResponse =
                         client.get("youtube/lyrics") {
                             parameter("id", bestMatch.realId)
                         }
-                    System.err.println("PaxsenixLyrics: YouTube lyrics status: ${lyricsResponse.status}")
+                    log("YouTube lyrics status: ${lyricsResponse.status}")
                     if (lyricsResponse.status == HttpStatusCode.OK) {
                         val data = cleanJsonLyrics(lyricsResponse.body<String>())
                         if (data != null) {
-                            System.err.println("PaxsenixLyrics: SUCCESS from YouTube")
+                            log("SUCCESS from YouTube")
                             return@runCatching data
                         }
-                        System.err.println("PaxsenixLyrics: YouTube returned error: ${data.orEmpty().take(200)}")
+                        log("YouTube returned error: ${data.orEmpty().take(200)}")
                     }
                 }
             }
@@ -513,7 +523,7 @@ object PaxsenixLyrics {
     ): Result<String> =
         runCatching {
             val query = "$title $artist"
-            System.err.println("PaxsenixLyrics: Requesting Musixmatch lyrics for: $query (Duration: $durationSeconds)")
+            log("Requesting Musixmatch lyrics for: $query (Duration: $durationSeconds)")
 
             // Try word-by-word first
             val mxmWord =
@@ -527,10 +537,10 @@ object PaxsenixLyrics {
             if (mxmWord.status == HttpStatusCode.OK) {
                 val data = cleanJsonLyrics(mxmWord.body<String>())
                 if (data != null) {
-                    System.err.println("PaxsenixLyrics: SUCCESS from Musixmatch (Word)")
+                    log("SUCCESS from Musixmatch (Word)")
                     return@runCatching data
                 }
-                System.err.println("PaxsenixLyrics: Musixmatch (Word) returned server error: ${data.orEmpty().take(200)}")
+                log("Musixmatch (Word) returned server error: ${data.orEmpty().take(200)}")
             }
 
             // Fallback to default
@@ -541,14 +551,14 @@ object PaxsenixLyrics {
                     parameter("a", artist)
                     parameter("d", durationSeconds.toString())
                 }
-            System.err.println("PaxsenixLyrics: Musixmatch lyrics status: ${mxmLyrics.status}")
+            log("Musixmatch lyrics status: ${mxmLyrics.status}")
             if (mxmLyrics.status == HttpStatusCode.OK) {
                 val data = cleanJsonLyrics(mxmLyrics.body<String>())
                 if (data != null) {
-                    System.err.println("PaxsenixLyrics: SUCCESS from Musixmatch")
+                    log("SUCCESS from Musixmatch")
                     return@runCatching data
                 }
-                System.err.println("PaxsenixLyrics: Musixmatch returned server error: ${data.orEmpty().take(200)}")
+                log("Musixmatch returned server error: ${data.orEmpty().take(200)}")
             }
             throw IllegalStateException("Musixmatch lyrics unavailable")
         }
@@ -559,29 +569,29 @@ object PaxsenixLyrics {
         durationSeconds: Int,
     ): Result<String> =
         runCatching {
-            System.err.println("PaxsenixLyrics: --- Starting search for [$title] by [$artist] ---")
+            log("--- Starting search for [$title] by [$artist] ---")
 
             getAppleMusicLyrics(title, artist, durationSeconds).getOrNull()?.let {
-                System.err.println("PaxsenixLyrics: Search FINISHED (Apple Music)")
+                log("Search FINISHED (Apple Music)")
                 return@runCatching it
             }
 
             getNeteaseLyrics(title, artist, durationSeconds).getOrNull()?.let {
-                System.err.println("PaxsenixLyrics: Search FINISHED (NetEase)")
+                log("Search FINISHED (NetEase)")
                 return@runCatching it
             }
 
             getSpotifyLyrics(title, artist, durationSeconds).getOrNull()?.let {
-                System.err.println("PaxsenixLyrics: Search FINISHED (Spotify)")
+                log("Search FINISHED (Spotify)")
                 return@runCatching it
             }
 
             getMusixmatchLyrics(title, artist, durationSeconds).getOrNull()?.let {
-                System.err.println("PaxsenixLyrics: Search FINISHED (Musixmatch)")
+                log("Search FINISHED (Musixmatch)")
                 return@runCatching it
             }
 
-            System.err.println("PaxsenixLyrics: Search FAILED - No providers found lyrics")
+            log("Search FAILED - No providers found lyrics")
             throw IllegalStateException("Lyrics unavailable from Paxsenix for $title")
         }
 
