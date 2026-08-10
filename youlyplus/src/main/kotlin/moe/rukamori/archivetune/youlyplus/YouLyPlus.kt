@@ -28,12 +28,38 @@ object YouLyPlus {
     private const val TTML_PATH = "v1/ttml/get"
     private const val LYRICS_PATH = "v2/lyrics/get"
 
+    // YouLyPlus mirror list, ordered by observed reliability.
+    //
+    // Removed `lyricsplus.binimum.org` — it 301-redirects to
+    // `lyrics.geeked.wtf`, a host that no longer resolves in DNS. Every
+    // single lyrics lookup was paying a full DNS-resolution timeout (often
+    // 5-15s) on that mirror before falling through to the next one, which
+    // is why YouLyPlus appeared "slow" or "broken" in production logs:
+    //
+    //   I/YouLyPlus: YouLyPlus v1/ttml/get fetch error from
+    //                https://lyricsplus.binimum.org/: Unable to resolve host
+    //                "lyrics.geeked.wtf": No address associated with hostname
+    //
+    // Removed `lyricsplus.atomix.one` — its Fastly certificate is
+    // misconfigured (cert CN is `t.sni-820-default.ssl.fastly.net`), so every
+    // request fails SSL hostname verification:
+    //
+    //   I/YouLyPlus: YouLyPlus v1/ttml/get fetch error from
+    //                https://lyricsplus.atomix.one/: Hostname
+    //                lyricsplus.atomix.one not verified: …
+    //
+    // `lyricsplus.prjktla.workers.dev` and `lyricsplus-seven.vercel.app`
+    // were demoted to the bottom — they consistently return 429 (Cloudflare
+    // Workers free-tier limit) and 402 (Vercel billing) respectively, but
+    // are kept as last-resort fallbacks in case the primary mirror is down.
+    //
+    // `lyricsplus.prjktla.my.id` is the only mirror that reliably returned
+    // 200 with valid lyrics in the production logs, so it's promoted to the
+    // top of the list.
     private val baseUrls =
         listOf(
-            "https://lyricsplus.binimum.org/",
             "https://lyricsplus.prjktla.my.id/",
             "https://lyricsplus.prjktla.workers.dev/",
-            "https://lyricsplus.atomix.one/",
             "https://lyricsplus-seven.vercel.app/",
         )
 
