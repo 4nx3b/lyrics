@@ -29,10 +29,33 @@ import java.util.Locale
 import kotlin.math.abs
 
 object PaxsenixLyrics {
-    private const val BASE_URL = "https://lyrics.paxsenix.org/"
+    private const val DEFAULT_BASE_URL = "https://lyrics.paxsenix.org/"
+
+    // Built-in default API key (provided by the PaxSenix service for
+    // ArchiveTune). Users can override this via Settings → Lyrics →
+    // Providers → Paxsenix API key. When the user-set key is blank, this
+    // built-in key is used as a fallback so the app works out-of-the-box.
+    private const val DEFAULT_API_KEY = "Sk-paxsenix-Cd3wtTnii7rZYR_vFUbsNuY408zwRUh079PDLhVgQI2LdDPr"
+
+    // User-configurable endpoint override. When blank, DEFAULT_BASE_URL is used.
+    // Set via setEndpoint() from the host app's DataStore preference
+    // (PaxsenixEndpointKey). Allows users to point at a self-hosted Paxsenix
+    // instance or a mirror like https://api.paxsenix.biz.id/lyrics.
+    private var baseUrl: String = DEFAULT_BASE_URL
 
     var userAgent: String = "ArchiveTune"
         private set
+
+    // User-configurable API key. When blank, the built-in DEFAULT_API_KEY is
+    // used as a fallback. When set, it's sent as
+    // "Authorization: Bearer <key>" on every Paxsenix API request.
+    // Set via setApiKey() from the host app's DataStore preference
+    // (PaxsenixApiKeyKey).
+    private var userApiKey: String = ""
+
+    // The effective API key — returns the user-set key if non-blank, otherwise
+    // the built-in default. Read at request time by the Ktor defaultRequest.
+    private val apiKey: String get() = userApiKey.ifBlank { DEFAULT_API_KEY }
 
     // Optional logger callback. When set by the host app (e.g. routed through
     // GlobalLog/Timber), diagnostic messages go through the app's normal logging
@@ -55,6 +78,31 @@ object PaxsenixLyrics {
         versionName: String,
     ) {
         userAgent = "$appName/$versionName"
+    }
+
+    /**
+     * Sets the user-provided Paxsenix API key. When non-blank, it's sent as
+     * an "Authorization: Bearer <key>" header on every Paxsenix API request.
+     * When blank, the built-in DEFAULT_API_KEY is used as a fallback.
+     */
+    fun setApiKey(key: String) {
+        userApiKey = key.trim()
+    }
+
+    /**
+     * Overrides the Paxsenix API endpoint. When [url] is blank, the default
+     * endpoint (https://lyrics.paxsenix.org/) is used. The URL must end with
+     * a trailing slash — if it doesn't, one is appended.
+     */
+    fun setEndpoint(url: String) {
+        val trimmed = url.trim()
+        baseUrl = if (trimmed.isBlank()) {
+            DEFAULT_BASE_URL
+        } else if (trimmed.endsWith("/")) {
+            trimmed
+        } else {
+            "$trimmed/"
+        }
     }
 
     // Apple Music AMP API (direct catalog search)
@@ -271,10 +319,17 @@ object PaxsenixLyrics {
             }
 
             defaultRequest {
-                url(BASE_URL)
+                // Read baseUrl and apiKey at request time (not at client
+                // creation time) so setEndpoint()/setApiKey() take effect
+                // immediately without needing to recreate the client.
+                url(baseUrl)
                 header(HttpHeaders.UserAgent, userAgent)
                 header(HttpHeaders.Accept, "application/json, text/plain, */*")
                 header(HttpHeaders.AcceptLanguage, "en-US,en;q=0.9")
+                // Attach the API key as a Bearer token when set.
+                if (apiKey.isNotBlank()) {
+                    header(HttpHeaders.Authorization, "Bearer $apiKey")
+                }
             }
 
             expectSuccess = false
