@@ -896,5 +896,87 @@ object PaxsenixLyrics {
         runSuspendCatching {
             client.get("api/stats").body<PaxsenixStats>()
         }
+
+    /** Outcome of probing one provider path on the configured endpoint. */
+    enum class PathStatus {
+        /** The endpoint serves this path (2xx, or a 4xx that is about our dummy parameters). */
+        AVAILABLE,
+
+        /** The endpoint answered but refuses this path outright — upstream retired it. */
+        RETIRED,
+
+        /** No usable answer: connection failure, timeout, or a server-side error. */
+        UNREACHABLE,
+    }
+
+    data class PathCheck(
+        /** Human-readable provider name, e.g. "Apple Music". */
+        val provider: String,
+        /** Path relative to the configured endpoint, e.g. "netease/search". */
+        val path: String,
+        val status: PathStatus,
+        /** HTTP status code, or null when the request never completed. */
+        val httpCode: Int?,
+    )
+
+    /**
+     * The one probe request per provider, in the order shown to the user.
+     *
+     * Each provider is represented by the *first* path its lyrics lookup hits, since a
+     * provider whose search path is gone cannot reach its lyrics path either. The query
+     * parameters are deliberate throwaways: this asks "does this endpoint still serve this
+     * route", not "can you find this song".
+     */
+    private val PROBE_PATHS =
+        listOf(
+            Triple("Apple Music", "apple-music/lyrics", "id" to "1440857781"),
+            Triple("NetEase", "netease/search", "q" to "test"),
+            Triple("Spotify", "spotify/search", "q" to "test"),
+            Triple("YouTube", "youtube/search", "q" to "test"),
+            Triple("Musixmatch", "musixmatch/lyrics", "q" to "test"),
+        )
+
+    /**
+     * Probes every per-provider path against the currently configured endpoint and reports
+     * which ones it still serves.
+     *
+     * ## Why this exists
+     *
+     * Paxsenix is a single service root with one sub-path per provider, and the app exposes a
+     * toggle per provider. Upstream has retired most of those routes — they answer 403 with an
+     * explicit "no longer available" message regardless of the API key — while `apple-music`
+     * still works. From inside the app that is indistinguishable from a wrong endpoint or a
+     * bad key: every provider just silently yields no lyrics. This turns the guesswork into a
+     * one-tap answer, and it re-runs against whatever endpoint the user has configured, so a
+     * self-hosted instance or a future mirror reports its own real coverage.
+     *
+     * A 403 is read as "retired" because that is how the public service signals a removed
+     * route; other 4xx codes mean the route exists and merely disliked the throwaway query.
+     * Never throws — a failed probe is reported as [PathStatus.UNREACHABLE].
+     */
+    suspend fun checkProviderPaths(): List<PathCheck> =
+        PROBE_PATHS.map { (provider, path, probeParam) ->
+            val (paramName, paramValue) = probeParam
+            try {
+                val status =
+                    client
+                        .get(path) {
+                            parameter(paramName, paramValue)
+                        }.status
+                val outcome =
+                    when {
+                        status == HttpStatusCode.Forbidden -> PathStatus.RETIRED
+                        status.value >= 500 -> PathStatus.UNREACHABLE
+                        else -> PathStatus.AVAILABLE
+                    }
+                log("endpoint check $path -> ${status.value} ($outcome)")
+                PathCheck(provider, path, outcome, status.value)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log("endpoint check $path failed: ${e.message}")
+                PathCheck(provider, path, PathStatus.UNREACHABLE, null)
+            }
+        }
 }
 // Cache invalidation
