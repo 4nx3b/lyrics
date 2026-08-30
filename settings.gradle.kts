@@ -8,8 +8,7 @@ dependencyResolutionManagement {
 
 include(":kugou")
 include(":lrclib")
-include(":simpmusic")
-include(":paxsenix")
+// :simpmusic and :paxsenix modules removed per user request (2026-08-30).
 include(":betterlyrics")
 include(":unison")
 include(":youlyplus")
