@@ -10,11 +10,6 @@ package moe.rukamori.archivetune.youlyplus.models
 import kotlinx.serialization.Serializable
 
 @Serializable
-data class YouLyPlusTtmlResponse(
-    val ttml: String? = null,
-)
-
-@Serializable
 data class YouLyPlusLyricsResponse(
     val type: String? = null,
     val lyrics: List<YouLyPlusLine> = emptyList(),

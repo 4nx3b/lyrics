@@ -21,46 +21,37 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.json.Json
 import moe.rukamori.archivetune.youlyplus.models.YouLyPlusLine
 import moe.rukamori.archivetune.youlyplus.models.YouLyPlusLyricsResponse
-import moe.rukamori.archivetune.youlyplus.models.YouLyPlusTtmlResponse
 import java.util.Locale
 
 object YouLyPlus {
-    private const val TTML_PATH = "v1/ttml/get"
     private const val LYRICS_PATH = "v2/lyrics/get"
 
-    // YouLyPlus mirror list, ordered by observed reliability.
+    // YouLyPlus mirror list, ordered by observed reliability (probed live
+    // 2026-09): `lyricsplus.binimum.org` serves the current KPoE API
+    // (v2/lyrics/get, `type:"Word"` with syllabus word timing) and is the
+    // only mirror returning 200 today, so it leads. The old comment about
+    // it 301-ing to a dead host is obsolete.
     //
-    // Removed `lyricsplus.binimum.org` — it 301-redirects to
-    // `lyrics.geeked.wtf`, a host that no longer resolves in DNS. Every
-    // single lyrics lookup was paying a full DNS-resolution timeout (often
-    // 5-15s) on that mirror before falling through to the next one, which
-    // is why YouLyPlus appeared "slow" or "broken" in production logs:
+    // `lyricsplus.prjktla.my.id` (the project's own domain) currently sits
+    // behind a broken Cloudflare origin (HTTP 530 / error 1033) — kept second
+    // in case it comes back, matching upstream's KPOE_SERVERS order.
     //
-    //   I/YouLyPlus: YouLyPlus v1/ttml/get fetch error from
-    //                https://lyricsplus.binimum.org/: Unable to resolve host
-    //                "lyrics.geeked.wtf": No address associated with hostname
+    // `lyricsplus.prjktla.workers.dev` is last: free-tier Cloudflare Worker
+    // that usually answers 429, occasionally recovers.
     //
-    // Removed `lyricsplus.atomix.one` — its Fastly certificate is
-    // misconfigured (cert CN is `t.sni-820-default.ssl.fastly.net`), so every
-    // request fails SSL hostname verification:
+    // `lyricsplus-seven.vercel.app` was REMOVED — Vercel answers 402
+    // (deployment disabled / billing), which is permanent, not transient.
     //
-    //   I/YouLyPlus: YouLyPlus v1/ttml/get fetch error from
-    //                https://lyricsplus.atomix.one/: Hostname
-    //                lyricsplus.atomix.one not verified: …
-    //
-    // `lyricsplus.prjktla.workers.dev` and `lyricsplus-seven.vercel.app`
-    // were demoted to the bottom — they consistently return 429 (Cloudflare
-    // Workers free-tier limit) and 402 (Vercel billing) respectively, but
-    // are kept as last-resort fallbacks in case the primary mirror is down.
-    //
-    // `lyricsplus.prjktla.my.id` is the only mirror that reliably returned
-    // 200 with valid lyrics in the production logs, so it's promoted to the
-    // top of the list.
+    // The v1/ttml/get endpoint was dropped entirely: upstream
+    // (ibratabian17/YouLyPlus) removed it and the only working mirror
+    // answers 404 there — probing it first only added latency to every
+    // lookup. Word-level timing now comes from v2's `syllabus` data via
+    // toLyricsText().
     private val baseUrls =
         listOf(
+            "https://lyricsplus.binimum.org/",
             "https://lyricsplus.prjktla.my.id/",
             "https://lyricsplus.prjktla.workers.dev/",
-            "https://lyricsplus-seven.vercel.app/",
         )
 
     private val jsonFormat by lazy {
@@ -106,8 +97,7 @@ object YouLyPlus {
 
         return try {
             val lyrics =
-                fetchTtml(cleanTitle, cleanArtist, cleanAlbum, durationSeconds)
-                    ?: fetchLyricsAsLrc(cleanTitle, cleanArtist, cleanAlbum, durationSeconds)
+                fetchLyricsAsLrc(cleanTitle, cleanArtist, cleanAlbum, durationSeconds)
                     ?: throw IllegalStateException("Lyrics unavailable")
             Result.success(lyrics)
         } catch (e: CancellationException) {
@@ -131,20 +121,6 @@ object YouLyPlus {
             durationSeconds = durationSeconds,
         ).onSuccess(callback)
     }
-
-    private suspend fun fetchTtml(
-        title: String,
-        artist: String,
-        album: String,
-        durationSeconds: Int,
-    ): String? =
-        fetchFromMirrors(TTML_PATH, title, artist, album, durationSeconds) { body ->
-            val trimmed = body.trim()
-            when {
-                trimmed.startsWith("<") -> trimmed
-                else -> jsonFormat.decodeFromString<YouLyPlusTtmlResponse>(body).ttml?.trim()
-            }?.takeIf { it.isNotBlank() && it.startsWith("<") }
-        }
 
     private suspend fun fetchLyricsAsLrc(
         title: String,
