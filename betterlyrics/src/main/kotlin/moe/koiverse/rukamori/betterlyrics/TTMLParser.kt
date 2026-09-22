@@ -9,6 +9,7 @@ package moe.rukamori.archivetune.betterlyrics
 
 import org.w3c.dom.Element
 import org.w3c.dom.Node
+import java.lang.Character.UnicodeScript
 import javax.xml.parsers.DocumentBuilderFactory
 
 object TTMLParser {
@@ -99,6 +100,7 @@ object TTMLParser {
                     val lineText = StringBuilder()
 
                     parseSpanElements(pElement, words, lineText, startTime, endTime, false, timingContext)
+                    trimTrailingWordSpace(words)
 
                     if (lineText.isEmpty()) {
                         val directText = getDirectTextContent(pElement).trim()
@@ -163,6 +165,7 @@ object TTMLParser {
                     val lineText = StringBuilder()
 
                     parseSpanElements(pElement, words, lineText, startTime, endTime, false, timingContext)
+                    trimTrailingWordSpace(words)
 
                     if (lineText.isEmpty()) {
                         val directText = getDirectTextContent(pElement).trim()
@@ -369,17 +372,16 @@ object TTMLParser {
                                             lineEndTime = lineEndTime,
                                             fallback = lineEndTime,
                                         ).coerceAtLeast(wordStartTime)
-                                    val trimmedText = wordText.trim()
-                                    if (trimmedText.isNotEmpty()) {
-                                        words.add(
-                                            ParsedWord(
-                                                text = trimmedText,
-                                                startTime = wordStartTime,
-                                                endTime = wordEndTime,
-                                                isBackground = isBgSpan,
-                                            ),
-                                        )
-                                    }
+                                    appendWordWithEdgeSpacing(
+                                        words = words,
+                                        rawText = wordText,
+                                        startTime = wordStartTime,
+                                        endTime = wordEndTime,
+                                        isBackground = isBgSpan,
+                                    )
+                                } else if (wordText.isBlank()) {
+                                    // Untimed whitespace-only span: pure separator token.
+                                    appendSeparatorSpace(words)
                                 }
                             }
                         }
@@ -390,17 +392,104 @@ object TTMLParser {
                     val text = node.textContent
                     if (text.isNotBlank()) {
                         lineText.append(text)
-                    } else if (text.isNotEmpty() && !text.contains('\n')) {
-                        if (words.isNotEmpty() && !words.last().text.endsWith(" ")) {
-                            lineText.append(" ")
-                            val lastWord = words.last()
-                            words[words.lastIndex] = lastWord.copy(text = lastWord.text + " ")
-                        }
+                    } else if (text.isNotEmpty() && isInterWordSeparator(text, words)) {
+                        lineText.append(" ")
+                        appendSeparatorSpace(words)
                     }
                 }
             }
         }
     }
+
+    // Word-boundary whitespace: TTML sources carry the separator space between
+    // words in different places. Apple Music style embeds it inside the span
+    // text ("<span>Hello </span><span>world</span>"); other sources emit it as
+    // a bare DOM text node or a whitespace-only span between the timed spans.
+    // Word-level lyrics renderers lay each word out verbatim, so trimming the
+    // edge whitespace collapsed "Hello world" into "Helloworld" for the
+    // embedded style. Keep one trailing space per word — and fold a leading
+    // space onto the previous word — so both source styles keep their gaps.
+    private fun appendWordWithEdgeSpacing(
+        words: MutableList<ParsedWord>,
+        rawText: String,
+        startTime: Double,
+        endTime: Double,
+        isBackground: Boolean,
+    ) {
+        val normalized = rawText.replace(whitespaceRegex, " ")
+        val core = normalized.trim()
+        if (core.isEmpty()) {
+            // Whitespace-only timed span acts purely as a separator token.
+            appendSeparatorSpace(words)
+            return
+        }
+        if (normalized.startsWith(" ")) {
+            appendSeparatorSpace(words)
+        }
+        val text = if (normalized.endsWith(" ")) "$core " else core
+        words.add(
+            ParsedWord(
+                text = text,
+                startTime = startTime,
+                endTime = endTime,
+                isBackground = isBackground,
+            ),
+        )
+    }
+
+    private fun appendSeparatorSpace(words: MutableList<ParsedWord>) {
+        val last = words.lastOrNull() ?: return
+        if (!last.text.endsWith(" ")) {
+            words[words.lastIndex] = last.copy(text = "${last.text} ")
+        }
+    }
+
+    // Pretty-printed TTML leaves a trailing whitespace node after the last span
+    // of a line, which the separator logic above turns into a trailing space on
+    // the final word. A gap at the very end of a line is meaningless (the line
+    // text itself is trimmed), so drop it to keep word text and line text
+    // consistent.
+    private fun trimTrailingWordSpace(words: MutableList<ParsedWord>) {
+        val last = words.lastOrNull() ?: return
+        val trimmed = last.text.trimEnd()
+        if (trimmed.length != last.text.length) {
+            words[words.lastIndex] = last.copy(text = trimmed)
+        }
+    }
+
+    // A whitespace-only DOM text node between spans is either a real word
+    // separator or pretty-print indentation. When the node has no newline it
+    // is always a separator. When it does contain a newline (pretty-printed
+    // XML), treat it as a separator only for space-using scripts — CJK lyrics
+    // are written without inter-word spaces, so indentation there must stay
+    // inert.
+    private fun isInterWordSeparator(
+        text: String,
+        words: List<ParsedWord>,
+    ): Boolean {
+        if (!text.contains('\n')) return true
+        if (words.isEmpty()) return false
+        return words.any { word -> usesWordSpacing(word.text) }
+    }
+
+    private val spaceUsingScripts =
+        setOf(
+            UnicodeScript.LATIN,
+            UnicodeScript.CYRILLIC,
+            UnicodeScript.GREEK,
+            UnicodeScript.HANGUL,
+            UnicodeScript.ARABIC,
+            UnicodeScript.HEBREW,
+            UnicodeScript.DEVANAGARI,
+            UnicodeScript.GEORGIAN,
+            UnicodeScript.ARMENIAN,
+            UnicodeScript.ETHIOPIC,
+        )
+
+    private fun usesWordSpacing(text: String): Boolean =
+        text.any { ch ->
+            Character.isLetter(ch) && Character.UnicodeScript.of(ch.code) in spaceUsingScripts
+        }
 
     private fun hasDirectSpanChildren(element: Element): Boolean {
         val childNodes = element.childNodes

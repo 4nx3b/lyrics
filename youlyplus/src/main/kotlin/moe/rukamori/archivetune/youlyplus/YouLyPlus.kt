@@ -21,6 +21,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.json.Json
 import moe.rukamori.archivetune.youlyplus.models.YouLyPlusLine
 import moe.rukamori.archivetune.youlyplus.models.YouLyPlusLyricsResponse
+import java.lang.Character.UnicodeScript
 import java.util.Locale
 
 object YouLyPlus {
@@ -187,9 +188,13 @@ object YouLyPlus {
                         append(formatLrcTimestamp(line.time ?: 0L, bracketed = true))
                         val syllables = line.syllabus.orEmpty().filter { !it.text.isNullOrBlank() && it.time != null }
                         if (type.equals("Word", ignoreCase = true) && syllables.isNotEmpty()) {
-                            syllables.forEach { syllable ->
+                            syllables.forEachIndexed { index, syllable ->
                                 append(formatLrcTimestamp(syllable.time ?: 0L, bracketed = false))
                                 append(syllable.text.orEmpty())
+                                val nextText = syllables.getOrNull(index + 1)?.text.orEmpty()
+                                if (nextText.isNotEmpty()) {
+                                    append(syllableSeparator(syllable.text.orEmpty(), nextText))
+                                }
                             }
                         } else {
                             append(line.text.orEmpty())
@@ -205,6 +210,42 @@ object YouLyPlus {
             .joinToString("\n")
             .takeIf(String::isNotBlank)
     }
+
+    // The v2 API's syllable tokens carry bare word text with no separator
+    // whitespace, so naively concatenating them produced lines like
+    // "Helloworldonfire". Rebuild the gaps: one space between two words,
+    // nothing around punctuation, and nothing inside scripts that are
+    // written without inter-word spaces (Han, kana, Thai, ...).
+    internal fun syllableSeparator(
+        current: String,
+        next: String,
+    ): String {
+        if (current.isEmpty() || next.isEmpty()) return ""
+        val last = current.last()
+        val first = next.first()
+        if (last.isWhitespace() || first.isWhitespace()) return ""
+        if (!first.isLetterOrDigit()) return ""
+        if (last in NO_SPACE_AFTER_CHARS) return ""
+        if (isSpacelessScript(last) && isSpacelessScript(first)) return ""
+        return " "
+    }
+
+    private val NO_SPACE_AFTER_CHARS = setOf('(', '[', '{', '«', '‹', '“', '‘')
+
+    private fun isSpacelessScript(ch: Char): Boolean =
+        ch.isLetter() &&
+            when (Character.UnicodeScript.of(ch.code)) {
+                UnicodeScript.HAN,
+                UnicodeScript.HIRAGANA,
+                UnicodeScript.KATAKANA,
+                UnicodeScript.THAI,
+                UnicodeScript.LAO,
+                UnicodeScript.KHMER,
+                UnicodeScript.MYANMAR,
+                -> true
+
+                else -> false
+            }
 
     private fun formatLrcTimestamp(
         timeMs: Long,
