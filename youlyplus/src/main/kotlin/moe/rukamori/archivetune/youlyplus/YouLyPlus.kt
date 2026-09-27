@@ -21,6 +21,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.json.Json
 import moe.rukamori.archivetune.youlyplus.models.YouLyPlusLine
 import moe.rukamori.archivetune.youlyplus.models.YouLyPlusLyricsResponse
+import moe.rukamori.archivetune.youlyplus.models.YouLyPlusSyllable
 import java.lang.Character.UnicodeScript
 import java.util.Locale
 
