@@ -75,13 +75,11 @@ object KuGou {
     ): Result<String> =
         runCatching {
             val keyword = generateKeyword(title, artist)
-            getLyricsCandidate(keyword, duration)?.let { candidate ->
-                Base64.Default
-                    .decode(
-                        downloadLyrics(candidate.id, candidate.accesskey).content,
-                    ).decodeToString()
-                    .normalize()
-            } ?: throw IllegalStateException("No lyrics candidate")
+            val candidate =
+                getLyricsCandidate(keyword, duration)
+                    ?: throw IllegalStateException("No lyrics candidate")
+            downloadBestLyrics(candidate.id, candidate.accesskey)
+                ?: throw IllegalStateException("No lyrics content")
         }
 
     suspend fun getAllPossibleLyricsOptions(
@@ -94,22 +92,12 @@ object KuGou {
         searchSongs(keyword).data.info.forEach {
             if (duration == -1 || abs(it.duration - duration) <= DURATION_TOLERANCE) {
                 searchLyricsByHash(it.hash).candidates.firstOrNull()?.let { candidate ->
-                    Base64.Default
-                        .decode(
-                            downloadLyrics(candidate.id, candidate.accesskey).content,
-                        ).decodeToString()
-                        .normalize()
-                        .let(callback)
+                    downloadBestLyrics(candidate.id, candidate.accesskey)?.let(callback)
                 }
             }
         }
         searchLyricsByKeyword(keyword, duration).candidates.forEach { candidate ->
-            Base64.Default
-                .decode(
-                    downloadLyrics(candidate.id, candidate.accesskey).content,
-                ).decodeToString()
-                .normalize()
-                .let(callback)
+            downloadBestLyrics(candidate.id, candidate.accesskey)?.let(callback)
         }
     }
 
@@ -169,15 +157,57 @@ object KuGou {
     private suspend fun downloadLyrics(
         id: Long,
         accessKey: String,
+        fmt: String = "lrc",
     ) = client
         .get("https://lyrics.kugou.com/download") {
-            parameter("fmt", "lrc")
+            parameter("fmt", fmt)
             parameter("charset", "utf8")
             parameter("client", "pc")
             parameter("ver", 1)
             parameter("id", id)
             parameter("accesskey", accessKey)
         }.body<DownloadLyricsResponse>()
+
+    /**
+     * Word-synced first: `fmt=qrc` returns QRC (per-word timing, consumed
+     * app-side by QRCParser) when the library has it — empty or a plain LRC
+     * for tracks without it, in which case the plain `fmt=lrc` download is
+     * the result. The XML-wrapped QRC form embeds CR/LF as character
+     * entities; those become real newlines so the parser can walk lines.
+     */
+    private suspend fun downloadBestLyrics(
+        id: Long,
+        accessKey: String,
+    ): String? {
+        val qrc =
+            runCatching {
+                Base64.Default
+                    .decode(downloadLyrics(id, accessKey, "qrc").content)
+                    .decodeToString()
+            }.getOrNull()
+        if (!qrc.isNullOrBlank() && looksLikeQrc(qrc)) {
+            return qrc
+                .replace("&#13;&#10;", "\n")
+                .replace("&#13;", "\n")
+                .replace("&#10;", "\n")
+        }
+        val lrc =
+            runCatching {
+                Base64.Default
+                    .decode(downloadLyrics(id, accessKey, "lrc").content)
+                    .decodeToString()
+            }.getOrNull() ?: return null
+        return lrc.takeIf { it.isNotBlank() }?.normalize()
+    }
+
+    /** True when the downloaded content carries QRC word timings (either the
+     * plain `[start,dur]word(w,d)` form or the XML-wrapped one). */
+    private fun looksLikeQrc(content: String): Boolean =
+        content.contains("<QrcInfos", ignoreCase = true) ||
+            content.contains("LyricContent=", ignoreCase = true) ||
+            QRC_WORD_TIMING_REGEX.containsMatchIn(content)
+
+    private val QRC_WORD_TIMING_REGEX = Regex("""]\S*\(\d+,\d+\)""")
 
     private fun normalizeTitle(title: String) =
         title

@@ -188,12 +188,26 @@ object YouLyPlus {
                         append(formatLrcTimestamp(line.time ?: 0L, bracketed = true))
                         val syllables = line.syllabus.orEmpty().filter { !it.text.isNullOrBlank() && it.time != null }
                         if (type.equals("Word", ignoreCase = true) && syllables.isNotEmpty()) {
+                            // Word boundaries come from the LINE'S OWN TEXT,
+                            // not from a heuristic over the syllable tokens:
+                            // the API routinely splits one word across several
+                            // syllabus entries ("to" + "night"), and the old
+                            // pair-wise heuristic inserted a space between the
+                            // pieces — printing one word as two. Aligning the
+                            // concatenated syllable text against the line text
+                            // means a separator appears exactly where the line
+                            // itself has whitespace, and syllables of the same
+                            // word are glued.
+                            val separators = alignedSyllableGaps(line.text.orEmpty(), syllables)
                             syllables.forEachIndexed { index, syllable ->
                                 append(formatLrcTimestamp(syllable.time ?: 0L, bracketed = false))
                                 append(syllable.text.orEmpty())
-                                val nextText = syllables.getOrNull(index + 1)?.text.orEmpty()
-                                if (nextText.isNotEmpty()) {
-                                    append(syllableSeparator(syllable.text.orEmpty(), nextText))
+                                if (index < syllables.size - 1) {
+                                    val nextText = syllables.getOrNull(index + 1)?.text.orEmpty()
+                                    append(
+                                        separators?.getOrNull(index)?.takeIf { it.isNotEmpty() }
+                                            ?: syllableSeparator(syllable.text.orEmpty(), nextText),
+                                    )
                                 }
                             }
                         } else {
@@ -209,6 +223,53 @@ object YouLyPlus {
             .filter(String::isNotBlank)
             .joinToString("\n")
             .takeIf(String::isNotBlank)
+    }
+
+    /**
+     * Separator to append after each syllable (before the next one), derived
+     * by aligning the concatenated syllable text against the line's own text:
+     * a boundary that falls where the line text has whitespace gets a space,
+     * one that falls inside a word gets nothing. Returns null when the
+     * syllables do not reconstruct the line text (punctuation drift, missing
+     * entries) — the caller then falls back to the pair-wise heuristic.
+     */
+    private fun alignedSyllableGaps(
+        lineText: String,
+        syllables: List<YouLyPlusSyllable>,
+    ): List<String>? {
+        if (lineText.isBlank()) return null
+        // Squash the authoritative line text, recording the whitespace run
+        // that preceded each non-whitespace character.
+        val gapsBefore = ArrayList<String>(lineText.length)
+        val squashed = StringBuilder(lineText.length)
+        var pendingGap = ""
+        for (ch in lineText) {
+            if (ch.isWhitespace()) {
+                pendingGap += ch
+            } else {
+                gapsBefore.add(pendingGap)
+                squashed.append(ch)
+                pendingGap = ""
+            }
+        }
+        val sq = squashed.toString()
+        val tokens = syllables.map { it.text.orEmpty().filterNot(Char::isWhitespace) }
+        val joined = tokens.joinToString("")
+        if (joined.isEmpty() || joined.length != sq.length || !sq.equals(joined, ignoreCase = true)) {
+            return null
+        }
+        val separators = ArrayList<String>(syllables.size)
+        var consumed = 0
+        for (index in tokens.indices) {
+            consumed += tokens[index].length
+            if (index == tokens.size - 1) {
+                separators.add("")
+                continue
+            }
+            val gap = if (consumed < gapsBefore.size) gapsBefore[consumed] else ""
+            separators.add(if (gap.isEmpty()) "" else " ")
+        }
+        return separators
     }
 
     // The v2 API's syllable tokens carry bare word text with no separator
