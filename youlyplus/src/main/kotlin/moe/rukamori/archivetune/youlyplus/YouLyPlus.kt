@@ -28,6 +28,14 @@ import java.util.Locale
 object YouLyPlus {
     private const val LYRICS_PATH = "v2/lyrics/get"
 
+    /** Floor for a merged word token's duration — a zero/negative span would
+     *  render as a non-animating word. */
+    private const val MIN_WORD_DURATION_MS = 40L
+
+    /** Last-resort duration for a word fragment with neither its own duration
+     *  nor a following fragment to measure against. */
+    private const val DEFAULT_WORD_DURATION_MS = 600L
+
     // YouLyPlus mirror list, ordered by observed reliability (probed live
     // 2026-09): `lyricsplus.binimum.org` serves the current KPoE API
     // (v2/lyrics/get, `type:"Word"` with syllabus word timing) and is the
@@ -187,30 +195,36 @@ object YouLyPlus {
                 .joinToString("\n") { line ->
                     buildString {
                         append(formatLrcTimestamp(line.time ?: 0L, bracketed = true))
-                        val syllables = line.syllabus.orEmpty().filter { !it.text.isNullOrBlank() && it.time != null }
+                        val syllables =
+                            line.syllabus.orEmpty()
+                                .filter { !it.text.isNullOrBlank() && it.time != null }
                         if (type.equals("Word", ignoreCase = true) && syllables.isNotEmpty()) {
-                            // Word boundaries come from the LINE'S OWN TEXT,
-                            // not from a heuristic over the syllable tokens:
-                            // the API routinely splits one word across several
-                            // syllabus entries ("to" + "night"), and the old
-                            // pair-wise heuristic inserted a space between the
-                            // pieces — printing one word as two. Aligning the
-                            // concatenated syllable text against the line text
-                            // means a separator appears exactly where the line
-                            // itself has whitespace, and syllables of the same
-                            // word are glued.
-                            val separators = alignedSyllableGaps(line.text.orEmpty(), syllables)
-                            syllables.forEachIndexed { index, syllable ->
-                                append(formatLrcTimestamp(syllable.time ?: 0L, bracketed = false))
-                                append(syllable.text.orEmpty())
-                                if (index < syllables.size - 1) {
-                                    val nextText = syllables.getOrNull(index + 1)?.text.orEmpty()
-                                    append(
-                                        separators?.getOrNull(index)?.takeIf { it.isNotEmpty() }
-                                            ?: syllableSeparator(syllable.text.orEmpty(), nextText),
-                                    )
-                                }
-                            }
+                            // YRC-style word tokens with TRUE durations: the v2
+                            // API gives every syllable both a start AND a
+                            // duration, but the old enhanced-LRC emission kept
+                            // only the starts — so a word's animation always
+                            // ended when the NEXT token began (the +600ms
+                            // default for line-final words) instead of when the
+                            // word is actually sung. `(startMs,durationMs)`
+                            // markers carry the real length through to the
+                            // app-side parser.
+                            //
+                            // Fragments of the SAME word are MERGED into one
+                            // token ("e"+"nough" -> "enough"): the API routinely
+                            // splits one word across several syllabus entries,
+                            // and emitting them as separate karaoke words made
+                            // each fragment animate for a sliver and read as
+                            // two words. A word boundary is where the LINE'S
+                            // OWN TEXT has whitespace (authoritative, when the
+                            // alignment works) or where the fragment itself
+                            // carries a trailing space.
+                            val lineEndMs =
+                                (line.time ?: 0L) + (line.duration ?: 0L).coerceAtLeast(0L)
+                            append(buildYrcWordTokens(
+                                syllables,
+                                alignedSyllableGaps(line.text.orEmpty(), syllables),
+                                lineEndMs,
+                            ))
                         } else {
                             append(line.text.orEmpty())
                         }
@@ -225,6 +239,103 @@ object YouLyPlus {
             .joinToString("\n")
             .takeIf(String::isNotBlank)
     }
+
+    /** Builds `word(startMs,durationMs)` tokens for a line, merging
+     * same-word syllable fragments. Gaps between tokens come from the
+     * authoritative line text when possible, otherwise from the fragments'
+     * own trailing whitespace. */
+    private fun buildYrcWordTokens(
+        syllables: List<YouLyPlusSyllable>,
+        alignedGaps: List<String>?,
+        lineEndMs: Long,
+    ): String = buildString {
+        val pieces =
+            syllables.mapIndexedNotNull { index, syllable ->
+                val time = syllable.time ?: return@mapIndexedNotNull null
+                val text = syllable.text.orEmpty()
+                YrcPiece(
+                    trimmed = text.trim(),
+                    hasTrailingSpace = text.lastOrNull()?.isWhitespace() == true,
+                    startMs = time,
+                    durationMs = syllable.duration ?: 0L,
+                    index = index,
+                )
+            }
+        if (pieces.isEmpty()) return@buildString
+
+        val groups = mutableListOf<MutableList<YrcPiece>>()
+        pieces.forEach { piece ->
+            val lastGroup = groups.lastOrNull()
+            val boundaryBefore =
+                if (lastGroup?.lastOrNull() == null) {
+                    true
+                } else {
+                    wordBoundaryAfter(lastGroup.last(), alignedGaps)
+                }
+            if (boundaryBefore || groups.isEmpty()) {
+                groups.add(mutableListOf(piece))
+            } else {
+                lastGroup!!.add(piece)
+            }
+        }
+
+        groups.forEachIndexed { groupIndex, group ->
+            val first = group.first()
+            val last = group.last()
+            // Effective end of the last fragment: its own duration when the
+            // API carries one, else the next fragment's start, else the line
+            // end.
+            val lastEndMs =
+                when {
+                    last.durationMs > 0L -> last.startMs + last.durationMs
+                    else -> {
+                        val nextPieceStart =
+                            pieces.firstOrNull { it.index > last.index }?.startMs
+                        nextPieceStart?.takeIf { it > last.startMs } ?: lineEndMs.takeIf { it > last.startMs }
+                            ?: (last.startMs + DEFAULT_WORD_DURATION_MS)
+                    }
+                }
+            val startMs = first.startMs
+            val durationMs = (lastEndMs - startMs).coerceAtLeast(MIN_WORD_DURATION_MS)
+            // Trailing space so verbatim word renderers keep the inter-word
+            // gap — same contract as the enhanced-LRC path.
+            val boundaryAfter =
+                if (groupIndex == groups.size - 1) {
+                    false
+                } else {
+                    wordBoundaryAfter(last, alignedGaps)
+                }
+            append(group.groupJoinText(boundaryAfter))
+            append('(')
+            append(startMs)
+            append(',')
+            append(durationMs)
+            append(')')
+        }
+    }
+
+    private fun List<YrcPiece>.groupJoinText(boundaryAfter: Boolean): String =
+        joinToString("") { it.trimmed } + if (boundaryAfter) " " else ""
+
+    /** Word boundary after [piece]: when the line-text alignment worked it
+     *  is AUTHORITATIVE (the API's own fragment text can disagree — "love "
+     *  followed by "," is one word in "love, tonight"); without alignment
+     *  the fragment's own trailing space is the best available signal. */
+    private fun wordBoundaryAfter(
+        piece: YrcPiece,
+        alignedGaps: List<String>?,
+    ): Boolean {
+        val alignedGap = alignedGaps?.getOrNull(piece.index)
+        return if (alignedGap != null) alignedGap.isNotEmpty() else piece.hasTrailingSpace
+    }
+
+    private data class YrcPiece(
+        val trimmed: String,
+        val hasTrailingSpace: Boolean,
+        val startMs: Long,
+        val durationMs: Long,
+        val index: Int,
+    )
 
     /**
      * Separator to append after each syllable (before the next one), derived
