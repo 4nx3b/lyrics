@@ -91,6 +91,15 @@ object YouLyPlus {
 
     var logger: ((String) -> Unit)? = null
 
+    // Rate-limit backoff: the upstream answers 429 under sustained load and
+    // the app fires one lookup per track change - without a cooldown every
+    // subsequent track burned a full request round (and the mirrors' shared
+    // quota) on guaranteed-429 calls. One 429 parks the provider for a
+    // minute; any mirror can trip it since they share the upstream API.
+    @Volatile private var rateLimitedUntilMs: Long = 0L
+
+    private const val RATE_LIMIT_COOLDOWN_MS = 60_000L
+
     suspend fun getLyrics(
         title: String,
         artist: String,
@@ -151,6 +160,14 @@ object YouLyPlus {
         durationSeconds: Int,
         decode: (String) -> String?,
     ): String? {
+        val now = System.currentTimeMillis()
+        if (now < rateLimitedUntilMs) {
+            logger?.invoke(
+                "YouLyPlus $path skipped: rate-limited for another " +
+                    "${(rateLimitedUntilMs - now) / 1000}s",
+            )
+            return null
+        }
         for (baseUrl in baseUrls) {
             currentCoroutineContext().ensureActive()
             val endpoint = baseUrl + path
@@ -166,6 +183,16 @@ object YouLyPlus {
                     }
                 val body = response.bodyAsText()
                 logger?.invoke("YouLyPlus $path response status: ${response.status}")
+
+                if (response.status.value == 429) {
+                    rateLimitedUntilMs =
+                        System.currentTimeMillis() + RATE_LIMIT_COOLDOWN_MS
+                    logger?.invoke(
+                        "YouLyPlus $path rate-limited - cooling down for " +
+                            "${RATE_LIMIT_COOLDOWN_MS / 1000}s",
+                    )
+                    return null
+                }
 
                 if (!response.status.isSuccess()) {
                     continue
